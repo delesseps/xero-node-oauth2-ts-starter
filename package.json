@@ -6,8 +6,7 @@
   "scripts": {
     "tsc": "tsc",
     "dev": "ts-node-dev --respawn --transpileOnly ./app/app.ts",
-    "prod": "tsc && node ./build/app.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "prod": "tsc && node ./build/app.js"
   },
   "author": "Xero Platform Team",
   "license": "MIT",
