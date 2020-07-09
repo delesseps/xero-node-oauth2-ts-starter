@@ -2,7 +2,8 @@ require('dotenv').config();
 import express from 'express';
 import { Request, Response } from 'express';
 import jwtDecode from 'jwt-decode';
-import { XeroClient } from 'xero-node';
+import { XeroClient, XeroIdToken, XeroAccessToken } from 'xero-node';
+import { TokenSet } from 'openid-client';
 
 const session = require('express-session');
 
@@ -11,51 +12,15 @@ const client_secret: string = process.env.CLIENT_SECRET;
 const redirectUrl: string = process.env.REDIRECT_URI;
 const scopes: string = 'openid profile email accounting.settings accounting.reports.read accounting.journals.read accounting.contacts accounting.attachments accounting.transactions offline_access';
 
-interface XeroJwt {
-	nbf: number
-	exp: number
-	iss: string,
-	aud: string
-	iat: number
-	at_hash: string
-	sid: string
-	sub: string
-	auth_time: number
-	idp: string
-	xero_userid: string
-	global_session_id: string
-	preferred_username: string
-	email: string
-	given_name: string
-	family_name: string
-	amr: string[]
-};
-
-interface XeroAccessToken {
-	nbf: number
-	exp: number
-	iss: string
-	aud: string
-	client_id: string
-	sub: string
-	auth_time: number
-	idp: string
-	xero_userid: string
-	global_session_id: string
-	jti: string
-	scope: string[]
-	amr: string[]
-};
-
 const xero = new XeroClient({
-	clientId: client_id,
-	clientSecret: client_secret,
-	redirectUris: [redirectUrl],
-	scopes: scopes.split(' '),
+  clientId: client_id,
+  clientSecret: client_secret,
+  redirectUris: [redirectUrl],
+  scopes: scopes.split(' '),
 });
 
 if (!client_id || !client_secret || !redirectUrl) {
-	throw Error('Environment Variables not all set - please check your .env file in the project root or create one!')
+  throw Error('Environment Variables not all set - please check your .env file in the project root or create one!')
 }
 
 const app: express.Application = express();
@@ -63,72 +28,98 @@ const app: express.Application = express();
 app.use(express.static(__dirname + '/build'));
 
 app.use(session({
-	secret: 'something crazy',
-	resave: false,
-	saveUninitialized: true,
-	cookie: { secure: false },
+  secret: 'something crazy',
+  resave: false,
+  saveUninitialized: true,
+  cookie: { secure: false },
 }));
 
-const authenticationData: any = (req: Request, res: Response) => {
-	return {
-		decodedIdToken: req.session.decodedIdToken,
-		decodedAccessToken: req.session.decodedAccessToken,
-		accessToken: req.session.accessToken,
-		allTenants: req.session.allTenants,
-		activeTenant: req.session.activeTenant,
-	};
-};
+app.get('/', async (req: Request, res: Response) => {
+  if (req.session.activeTenant) {
+    try {
+      // console.log('activeTenant', req.session.activeTenant);
 
-app.get('/', (req: Request, res: Response) => {
-	res.send(`<a href='/connect'>Connect to Xero</a>`);
+      const response: any = await xero.accountingApi.getOrganisations(req.session.activeTenant.tenantId);
+      req.session.activeTenantName = response.body.organisations[0].name;
+      res.send(`<p>Connected to: ${req.session.activeTenantName}</p><p><a href='/disconnect'>Disconnect</a></p>`);
+    } catch (err) {
+      if (err.response.statusCode === 401) {
+        res.send(`<p>Session has expired...</p><p><a href='/connect'>Reconnect ${req.session.activeTenantName}</a></p><p><a href='/disconnect'>Disconnect</a></p>`);
+      } else {
+        console.log('err', err);
+        res.send('Sorry, something went wrong');
+      }
+    }
+  } else {
+    res.send(`<a href='/connect'>Connect to Xero</a>`);
+  }
+});
+
+app.get('/disconnect', async (req: Request, res: Response) => {
+  try {
+    if (req.session.activeTenant) {
+      console.log('disconnecting:', req.session.activeTenant.id);
+      const updatedTokenSet: TokenSet = await xero.disconnect(req.session.activeTenant.id);
+      await xero.updateTenants();
+
+      // if > 1 Organisation connected, update token
+      if (xero.tenants.length > 0) {
+        const decodedIdToken: XeroIdToken = jwtDecode(updatedTokenSet.id_token);
+        const decodedAccessToken: XeroAccessToken = jwtDecode(updatedTokenSet.access_token);
+        req.session.decodedIdToken = decodedIdToken;
+        req.session.decodedAccessToken = decodedAccessToken;
+        req.session.tokenSet = updatedTokenSet;
+        req.session.allTenants = xero.tenants;
+        req.session.activeTenant = xero.tenants[0];
+      } else {
+        req.session.decodedIdToken = undefined;
+        req.session.decodedAccessToken = undefined;
+        req.session.allTenants = undefined;
+        req.session.activeTenant = undefined;
+      }
+      req.session.activeTenantName = undefined;
+      res.redirect('/');
+    } else {
+      res.redirect('/');
+    }
+  } catch (err) {
+    res.send('Sorry, something went wrong');
+  }
 });
 
 app.get('/connect', async (req: Request, res: Response) => {
-	try {
-		const consentUrl: string = await xero.buildConsentUrl();
-		res.redirect(consentUrl);
-	} catch (err) {
-		res.send('Sorry, something went wrong');
-	}
+  try {
+    const consentUrl: string = await xero.buildConsentUrl();
+    res.redirect(consentUrl);
+  } catch (err) {
+    res.send('Sorry, something went wrong');
+  }
 });
 
 app.get('/callback', async (req: Request, res: Response) => {
-	try {
-		const url: string = `${redirectUrl}/${req.originalUrl}`;
-		await xero.setAccessTokenFromRedirectUri(url);
+  try {
+    const accessToken: TokenSet = await xero.apiCallback(req.url);
+    await xero.updateTenants();
 
-		const accessToken = await xero.readTokenSet();
+    if (accessToken.id_token) {
+      const decodedIdToken: XeroIdToken = jwtDecode(accessToken.id_token);
+      req.session.decodedIdToken = decodedIdToken;
+    }
+    const decodedAccessToken: XeroAccessToken = jwtDecode(accessToken.access_token);
 
-		const decodedIdToken: XeroJwt = jwtDecode(accessToken.id_token);
-		const decodedAccessToken: XeroAccessToken = jwtDecode(accessToken.access_token);
+    req.session.decodedAccessToken = decodedAccessToken;
+    req.session.accessToken = accessToken;
+    req.session.allTenants = xero.tenants;
+    req.session.activeTenant = xero.tenants[0];
 
-		req.session.decodedIdToken = decodedIdToken;
-		req.session.decodedAccessToken = decodedAccessToken;
-		req.session.accessToken = accessToken;
-		req.session.allTenants = xero.tenantIds;
-		req.session.activeTenant = xero.tenantIds[0];
-
-		const authData: any = authenticationData(req, res);
-
-		console.log(authData);
-
-		res.redirect('/organisation');
-	} catch (err) {
-		res.send('Sorry, something went wrong');
-	}
-});
-
-app.get('/organisation', async (req: Request, res: Response) => {
-	try {
-		const response: any = await xero.accountingApi.getOrganisations(req.session.activeTenant);
-		res.send(`Hello, ${response.body.organisations[0].name}`);
-	} catch (err) {
-		res.send('Sorry, something went wrong');
-	}
+    res.redirect('/');
+  } catch (err) {
+    res.send(`Sorry, something went wrong: ${JSON.stringify(err)}`);
+  }
 });
 
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
-	console.log(`App listening on port ${PORT}`);
+  console.log(`App listening on port ${PORT}`);
 });
