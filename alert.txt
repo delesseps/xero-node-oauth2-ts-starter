@@ -1,0 +1,7 @@
+I couldn't figure out how else to send you a message.
+
+You'll want to use this ts-starter as it's more up to date than the one on my personal github:
+https://github.com/XeroAPI/xero-node-oauth2-ts-starter
+
+And also check out our sample calls app here:
+https://github.com/XeroAPI/xero-node-oauth2-app
